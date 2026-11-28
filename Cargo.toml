@@ -1,6 +1,6 @@
 [package]
 name = "mac-clamshell-mcp"
-version = "1.5.1"
+version = "1.5.2"
 edition = "2021"
 description = "Native macOS clamshell performance throttling, display thermal guard, built-in brightness control, and MCP dashboard"
 license = "MIT"
