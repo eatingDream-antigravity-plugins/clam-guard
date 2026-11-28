@@ -115,15 +115,22 @@ interface CachedSnap {
   data: PanelSnapshot;
 }
 
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
 const loadSnap = (): CachedSnap | null => {
   try {
     if (typeof localStorage >= "u") return null;
     const raw = localStorage.getItem(SKEY);
     if (!raw) return null;
     const p = JSON.parse(raw) as Partial<CachedSnap> | null;
-    return p && p.v === 1 && typeof p.savedAt === "number" && p.data && typeof p.data === "object"
-      ? (p as CachedSnap)
-      : null;
+    if (!isObj(p) || p.v !== 1 || typeof p.savedAt !== "number" || !Number.isFinite(p.savedAt) || !isObj(p.data)) {
+      return null;
+    }
+    const d = p.data as PanelSnapshot;
+    if (!isObj(d.host) || !isObj(d.settings) || !isObj(d.policy) || !isObj(d.display)) return null;
+    if (d.cpuTopology !== undefined && !isObj(d.cpuTopology)) return null;
+    if (d.host.memory !== undefined && !isObj(d.host.memory)) return null;
+    return p as CachedSnap;
   } catch {
     return null;
   }
@@ -142,7 +149,13 @@ const saveSnap = (s: PanelSnapshot | null): void => {
 };
 
 const cachedSnap = loadSnap();
-const useCached = !!cachedSnap && (!boot || cachedSnap.savedAt > (boot.bootTs ?? 0));
+const snapNewer = (c: PanelSnapshot, b: PanelSnapshot): boolean => {
+  const ct0 = c.timestamp ? Date.parse(c.timestamp) : NaN;
+  const bt0 = b.timestamp ? Date.parse(b.timestamp) : NaN;
+  return !Number.isFinite(ct0) || !Number.isFinite(bt0) || ct0 >= bt0;
+};
+const useCached =
+  !!cachedSnap && (!boot || (cachedSnap.savedAt > (boot.bootTs ?? 0) && snapNewer(cachedSnap.data, boot)));
 const initSnap: PanelSnapshot | null = useCached ? cachedSnap.data : boot;
 
 let hostLoc: string | null = null;

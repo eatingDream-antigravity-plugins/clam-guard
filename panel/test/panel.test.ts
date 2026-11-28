@@ -1818,7 +1818,15 @@ describe("Clam Guard Panel: Adaptive Polling, Brightness Coalescing, Fan Ownersh
     assert.equal(cacheRun.rpcCalls.length, 1, "hydrated localStorage boot must trigger background SWR refresh after connect");
     assert.equal(cacheRun.rpcCalls[0].name, "clamshell_refresh");
 
-    // A2. Newer localStorage overrides older boot (savedAt > boot.bootTs)
+    // A2. Newer localStorage overrides older boot (savedAt > boot.bootTs), while corrupt cache fails safely
+    const corruptRun = await runWeakNetHarness({
+      bootOverride: null,
+      initialStorage: {
+        "mac-clamshell-snap": JSON.stringify({ v: 1, savedAt: 49_000, data: { host: null, settings: {}, policy: {}, display: {} } }),
+      },
+    });
+    assert.equal(corruptRun.byId.get("emp")!.hidden, false, "corrupt localStorage snapshot must fall back cleanly to loading state");
+
     const newerCacheRun = await runWeakNetHarness({
       bootOverride: { ...baseBoot, bootTs: 40_000, lidState: "open", hash: "h-old-boot" },
       initialStorage: {
