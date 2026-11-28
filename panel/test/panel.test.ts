@@ -712,7 +712,13 @@ describe("Clam Guard Panel: Adaptive Polling, Brightness Coalescing, Fan Ownersh
         loadAvg: [1, 1, 1],
         memory: { usedGb: 8, totalGb: 16, compressedGb: 1, usedPct: 50 },
       },
-      settings: { modeOverride: "auto", maxJobsOverride: 0, guardEnabled: true, acClosedProfile: "utility" },
+      settings: {
+        modeOverride: "auto",
+        maxJobsOverride: 0,
+        guardEnabled: true,
+        acClosedProfile: "utility",
+        bgPollIntervalSec: 6,
+      },
       policy: { profile: "normal", modeSource: "auto", maxJobs: 10, niceLevel: 0 },
       envVars: {},
       display: { available: true, percent: 60, savedPercent: 60, asleep: false },
@@ -1196,7 +1202,13 @@ describe("Clam Guard Panel: Adaptive Polling, Brightness Coalescing, Fan Ownersh
         loadAvg: [1, 1, 1],
         memory: { usedGb: 8, totalGb: 16, compressedGb: 1, usedPct: 50 },
       },
-      settings: { modeOverride: "auto", maxJobsOverride: 0, guardEnabled: true, acClosedProfile: "utility" },
+      settings: {
+        modeOverride: "auto",
+        maxJobsOverride: 0,
+        guardEnabled: true,
+        acClosedProfile: "utility",
+        bgPollIntervalSec: 6,
+      },
       policy: { profile: "normal", modeSource: "auto", maxJobs: 8, niceLevel: 0 },
       display: { available: true, percent: 60, savedPercent: 60, asleep: false },
       fan: {
@@ -1377,7 +1389,13 @@ describe("Clam Guard Panel: Adaptive Polling, Brightness Coalescing, Fan Ownersh
       policy: { profile: "normal", autoProfile: "normal", maxJobs: 10 },
       profileJobs: { normal: 10, utility: 4, eco: 2, strict: 1, autoEco: 1 },
       guardStatus: "armed",
-      settings: { modeOverride: "auto", maxJobsOverride: 0, guardEnabled: true, acClosedProfile: "utility" },
+      settings: {
+        modeOverride: "auto",
+        maxJobsOverride: 0,
+        guardEnabled: true,
+        acClosedProfile: "utility",
+        bgPollIntervalSec: 6,
+      },
       envVars: { CARGO_BUILD_JOBS: "4" },
     };
     const paused = computeOptimisticState(base, { guardEnabled: false, modeOverride: "eco", maxJobsOverride: 3 });
@@ -1529,5 +1547,349 @@ describe("Clam Guard Panel: Adaptive Polling, Brightness Coalescing, Fan Ownersh
       clearInterval(interval);
       progApp.close();
     }
+  });
+
+  it("supports weak-net RTT scaling, 0ms localStorage SWR hydration, fresh-boot coalescing, document.hidden pause, and pollSeq out-of-order drop", async () => {
+    assert.equal(computeAdaptiveIntervalMs({ rttMs: 2000, fgOverrideMs: 3000 }), 6000);
+    assert.equal(computeAdaptiveIntervalMs({ rttMs: 6000, fgOverrideMs: 3000 }), 15_000);
+
+    const html = fs.readFileSync(path.join(PANEL_DIR, "dist", "panel.html"), "utf8");
+    const m = html.match(/<script>([\s\S]+)<\/script>/);
+    assert.ok(m);
+
+    const baseBoot: PanelSnapshot = {
+      timestamp: "2026-01-01T00:00:00Z",
+      locale: "en",
+      lidState: "open",
+      powerSource: "ac",
+      batteryPct: 90,
+      thermalState: "ok",
+      thermalPressure: "nominal",
+      cpuTopology: { total: 8, performanceCores: 4, efficiencyCores: 4 },
+      host: {
+        hostname: "mbp",
+        chip: "Apple M3",
+        macosVersion: "15.4",
+        uptimeSeconds: 600,
+        loadAvg: [1, 1, 1],
+        memory: { usedGb: 8, totalGb: 16, compressedGb: 1, usedPct: 50 },
+      },
+      settings: { modeOverride: "auto", maxJobsOverride: 0, guardEnabled: true, acClosedProfile: "utility" },
+      policy: { profile: "normal", autoProfile: "normal", modeSource: "auto", maxJobs: 8, niceLevel: 0 },
+      display: { available: true, percent: 60, savedPercent: 60, asleep: false },
+      fan: { status: "fanless", fans: [], smcMode: "none", controller: "System (macOS)", ownershipMode: "observer", readOnly: true },
+      guardStatus: "armed",
+      hash: "h-boot",
+    };
+
+    const runWeakNetHarness = async ({
+      bootOverride,
+      initialStorage,
+      clockStart = 50_000,
+    }: {
+      bootOverride: PanelSnapshot | null;
+      initialStorage?: Record<string, string>;
+      clockStart?: number;
+    }) => {
+      const byId = new Map<string, FakeElement>();
+      const mkEl = (id = "", attrs: Record<string, string> = {}): FakeElement => {
+        const attrMap = new Map(Object.entries(attrs));
+        let textVal = "";
+        const listeners = new Map<string, Array<(ev?: unknown) => void>>();
+        const el: FakeElement = {
+          id,
+          disabled: false,
+          hidden: false,
+          tabIndex: 0,
+          className: "",
+          title: "",
+          style: { setProperty() {}, backgroundColor: "", colorScheme: "", width: "" },
+          lastElementChild: null,
+          get textContent(): string {
+            return textVal;
+          },
+          set textContent(v: string) {
+            textVal = String(v);
+          },
+          setAttribute(k, v) {
+            attrMap.set(k, String(v));
+          },
+          getAttribute(k) {
+            return attrMap.has(k) ? attrMap.get(k)! : null;
+          },
+          removeAttribute(k) {
+            attrMap.delete(k);
+          },
+          appendChild(c) {
+            return c;
+          },
+          replaceChildren() {},
+          addEventListener(t, fn) {
+            if (!listeners.has(t)) listeners.set(t, []);
+            listeners.get(t)!.push(fn);
+          },
+          removeEventListener(t, fn) {
+            listeners.set(t, (listeners.get(t) || []).filter((f) => f !== fn));
+          },
+          dispatch(t, ev) {
+            for (const fn of listeners.get(t) || []) fn(ev);
+          },
+          querySelector: () => null,
+          querySelectorAll: () => [],
+          getBoundingClientRect: () => ({ width: 380, height: 600, left: 0 }),
+        };
+        if (id) byId.set(id, el);
+        return el;
+      };
+      const appRoot = mkEl("app");
+      for (const id of [
+        "shell", "emp", "emp-msg", "emp-btn", "swp", "hd", "hs", "fb", "fb-p", "fb-d", "fb-t", "fb-r",
+        "auto-chip", "auto-lbl", "lang-grp", "refresh-btn", "bnr", "bnr-t", "bnr-act", "bnr-x",
+        "k0", "h-lid-d", "h-lid", "k1", "h-pwr-d", "h-pwr", "hbb", "hbf", "k2", "h-thm-d", "h-thm", "k3", "h-grd-d", "h-grd",
+        "k4", "bt", "bv", "bright-track", "prs-grp", "bc", "k5", "gs", "guard-btn", "lock-btn", "k6",
+        "k7", "mb", "mode-rail", "k8", "ar", "jd", "sv", "ji", "fan-card", "k9", "frpm", "fth", "frow2", "ka", "fctrl", "fown", "fcap",
+        "diag-tray", "kb", "tp", "kc", "dmu", "dmt", "dmf", "dc", "kd", "dld", "dsp", "ds", "dlm", "ke", "ac-grp", "de", "dh", "dhi", "ht", "ft",
+      ]) {
+        mkEl(id);
+      }
+      byId.get("guard-btn")!.setAttribute("data-a", "guard");
+      byId.get("auto-chip")!.lastElementChild = byId.get("auto-lbl")!;
+
+      const storageMap = new Map<string, string>(Object.entries(initialStorage || {}));
+      const localStorageMock = {
+        getItem: (k: string) => (storageMap.has(k) ? storageMap.get(k)! : null),
+        setItem: (k: string, v: string) => void storageMap.set(k, String(v)),
+        removeItem: (k: string) => void storageMap.delete(k),
+      };
+
+      let docHidden = false;
+      const docListeners = new Map<string, Array<(ev?: unknown) => void>>();
+      const winListeners = new Map<string, Array<(ev?: unknown) => void>>();
+      const emitWin = (type: string, ev: unknown): void => {
+        for (const fn of winListeners.get(type) || []) fn(ev);
+      };
+      const timers: Array<{ id: number; fn: () => void; ms: number; cleared: boolean }> = [];
+      let tid = 1;
+      const rpcCalls: Array<{ id: unknown; name: string; arguments: Record<string, unknown> }> = [];
+      const pendingCalls: Array<(payload: Record<string, unknown>) => void> = [];
+      let holdRpc = false;
+
+      const fakeParent = {
+        postMessage(msg: { id?: unknown; method?: string; params?: { name: string; arguments: Record<string, unknown> } }): void {
+          if (msg.method === "ui/initialize") {
+            setImmediate(() =>
+              emitWin("message", {
+                source: fakeParent,
+                data: {
+                  jsonrpc: "2.0",
+                  id: msg.id,
+                  result: {
+                    protocolVersion: "2026-01-26",
+                    hostCapabilities: { serverTools: {} },
+                    hostContext: { theme: "dark" },
+                  },
+                },
+              })
+            );
+          } else if (msg.method === "tools/call" && msg.params) {
+            rpcCalls.push({ id: msg.id, ...msg.params });
+            const respond = (sc: Record<string, unknown>) =>
+              emitWin("message", {
+                source: fakeParent,
+                data: {
+                  jsonrpc: "2.0",
+                  id: msg.id,
+                  result: { content: [{ type: "text", text: "ok" }], structuredContent: sc },
+                },
+              });
+            if (holdRpc) {
+              pendingCalls.push(respond);
+            } else {
+              setImmediate(() =>
+                respond({
+                  unchanged: true,
+                  hash: bootOverride?.hash || "h-boot",
+                  timestamp: "2026-01-01T00:00:05Z",
+                  serverMs: 1,
+                })
+              );
+            }
+          }
+        },
+      };
+
+      let clock = clockStart;
+      class FakeDate extends Date {
+        static override now(): number {
+          return clock;
+        }
+      }
+
+      const ctx: Record<string, unknown> = {
+        window: {
+          parent: fakeParent,
+          innerWidth: 400,
+          __MAC_CLAMSHELL_BOOT__: bootOverride,
+          addEventListener(t: string, fn: (ev?: unknown) => void) {
+            if (!winListeners.has(t)) winListeners.set(t, []);
+            winListeners.get(t)!.push(fn);
+          },
+          removeEventListener(t: string, fn: (ev?: unknown) => void) {
+            winListeners.set(t, (winListeners.get(t) || []).filter((f) => f !== fn));
+          },
+        },
+        document: {
+          documentElement: mkEl("__html"),
+          body: mkEl("__body"),
+          get hidden(): boolean {
+            return docHidden;
+          },
+          getElementById: (id: string) => byId.get(id) || null,
+          querySelector: () => null,
+          createElement: (tag: string) => mkEl("", { _tag: tag }),
+          createTextNode: (t: unknown) => ({ textContent: String(t) }),
+          addEventListener(t: string, fn: (ev?: unknown) => void) {
+            if (!docListeners.has(t)) docListeners.set(t, []);
+            docListeners.get(t)!.push(fn);
+          },
+          removeEventListener(t: string, fn: (ev?: unknown) => void) {
+            docListeners.set(t, (docListeners.get(t) || []).filter((f) => f !== fn));
+          },
+        },
+        localStorage: localStorageMock,
+        navigator: { language: "en-US" },
+        performance: { now: () => clock },
+        Date: FakeDate,
+        setTimeout: (fn: () => void, ms: number) => {
+          const id = tid++;
+          timers.push({ id, fn, ms, cleared: false });
+          return id;
+        },
+        clearTimeout: (id: number) => {
+          const t = timers.find((x) => x.id === id);
+          if (t) t.cleared = true;
+        },
+        requestAnimationFrame: (fn: () => void) => fn(),
+        console,
+      };
+      ctx.globalThis = ctx;
+      vm.runInNewContext(m[1], ctx);
+
+      return {
+        byId,
+        appRoot,
+        mkEl,
+        timers,
+        rpcCalls,
+        pendingCalls,
+        storageMap,
+        setHoldRpc: (v: boolean) => {
+          holdRpc = v;
+        },
+        setHidden: (v: boolean) => {
+          docHidden = v;
+          for (const fn of docListeners.get("visibilitychange") || []) fn();
+        },
+        advanceClock: (ms: number) => {
+          clock += ms;
+        },
+      };
+    };
+
+    // A. Instant 0ms localStorage hydration when boot === null (no "Loading..." flash before connect())
+    const cachedClosed: PanelSnapshot = {
+      ...baseBoot,
+      lidState: "closed",
+      guardStatus: "protecting",
+      hash: "h-cached",
+    };
+    const cacheRun = await runWeakNetHarness({
+      bootOverride: null,
+      initialStorage: {
+        "mac-clamshell-snap": JSON.stringify({ v: 1, savedAt: 49_000, data: cachedClosed }),
+      },
+    });
+    // Synchronously at Frame 0 before connect() finishes:
+    assert.equal(cacheRun.byId.get("emp")!.hidden, true, "must not flash empty/loading screen when localStorage has snapshot");
+    assert.equal(cacheRun.byId.get("h-lid")!.textContent, "Closed");
+    assert.equal(cacheRun.byId.get("bv")!.textContent, "60%");
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(cacheRun.rpcCalls.length, 1, "hydrated localStorage boot must trigger background SWR refresh after connect");
+    assert.equal(cacheRun.rpcCalls[0].name, "clamshell_refresh");
+
+    // A2. Newer localStorage overrides older boot (savedAt > boot.bootTs), while corrupt cache fails safely
+    const corruptRun = await runWeakNetHarness({
+      bootOverride: null,
+      initialStorage: {
+        "mac-clamshell-snap": JSON.stringify({ v: 1, savedAt: 49_000, data: { host: null, settings: {}, policy: {}, display: {} } }),
+      },
+    });
+    assert.equal(corruptRun.byId.get("emp")!.hidden, false, "corrupt localStorage snapshot must fall back cleanly to loading state");
+
+    const newerCacheRun = await runWeakNetHarness({
+      bootOverride: { ...baseBoot, bootTs: 40_000, lidState: "open", hash: "h-old-boot" },
+      initialStorage: {
+        "mac-clamshell-snap": JSON.stringify({ v: 1, savedAt: 49_000, data: cachedClosed }),
+      },
+    });
+    assert.equal(newerCacheRun.byId.get("h-lid")!.textContent, "Closed", "newer localStorage must override older boot");
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(newerCacheRun.rpcCalls.length, 1);
+
+    // B. Fresh-boot coalescing (bootTs < 2500ms, stale: false) + document.hidden pause + out-of-order pollSeq drop
+    const freshBoot: PanelSnapshot = { ...baseBoot, bootTs: 49_500, stale: false };
+    const freshRun = await runWeakNetHarness({
+      bootOverride: freshBoot,
+      clockStart: 50_000,
+    });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(freshRun.rpcCalls.length, 0, "fresh SSR boot (<2500ms) must coalesce duplicate t=0 refresh");
+    const activePollTimers = freshRun.timers.filter((t) => !t.cleared && t.ms >= POLL_INTERVAL_FAST_MS);
+    assert.equal(activePollTimers.length, 1, "markInitialBoot must schedule first poll at currentIntervalMs");
+
+    // document.hidden pauses polling immediately with default bgPollIntervalSec=0
+    freshRun.setHidden(true);
+    const remainingPollTimers = freshRun.timers.filter((t) => !t.cleared && t.ms >= POLL_INTERVAL_FAST_MS);
+    assert.equal(remainingPollTimers.length, 0, "document.hidden must cancel active poll timer when bgPollIntervalSec <= 0");
+    assert.equal(freshRun.byId.get("ft")!.textContent, "Paused");
+
+    // Returning to visible triggers visibility refresh; simulate out-of-order stale poll reply dropped after configure
+    freshRun.setHoldRpc(true);
+    freshRun.advanceClock(1000);
+    freshRun.setHidden(false);
+    assert.equal(freshRun.rpcCalls.length, 1);
+    assert.equal(freshRun.rpcCalls[0].name, "clamshell_refresh");
+
+    const ecoBtn = freshRun.mkEl("m-eco", { "data-m": "eco" });
+    freshRun.appRoot.dispatch("click", { target: { closest: () => ecoBtn } });
+    assert.equal(freshRun.rpcCalls.length, 2);
+    assert.equal(freshRun.rpcCalls[1].name, "clamshell_configure");
+
+    // Resolve newer configure (seq 2) BEFORE older refresh (seq 1)
+    freshRun.pendingCalls[1]({
+      ...freshBoot,
+      settings: { ...freshBoot.settings, modeOverride: "eco" },
+      policy: { ...freshBoot.policy, profile: "eco", modeSource: "manual", maxJobs: 2 },
+      hash: "h-eco",
+      serverMs: 2,
+    });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(freshRun.byId.get("mb")!.textContent, "Manual");
+
+    // Now stale refresh resolves with old profile "normal" / hash "h-boot" — MUST be dropped!
+    freshRun.pendingCalls[0]({
+      ...freshBoot,
+      lidState: "closed",
+      settings: { ...freshBoot.settings, modeOverride: "auto" },
+      policy: { ...freshBoot.policy, profile: "normal", modeSource: "auto", maxJobs: 8 },
+      hash: "h-boot",
+      serverMs: 5,
+    });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(freshRun.byId.get("h-lid")!.textContent, "Open", "stale out-of-order poll reply must be dropped");
+    assert.equal(freshRun.byId.get("mb")!.textContent, "Manual");
   });
 });

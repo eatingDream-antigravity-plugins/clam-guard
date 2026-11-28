@@ -900,6 +900,7 @@ mod tests {
         let html = res["result"]["contents"][0]["text"].as_str().unwrap();
         assert!(html.contains("window.__MAC_CLAMSHELL_BOOT__="));
         assert!(html.contains("\"display\":"));
+        assert!(html.contains("\"bootTs\":"));
         assert!(!html.contains("/*__MAC_CLAMSHELL_BOOT__*/"));
 
         let panel = handle_rpc_value_with_session(
@@ -1037,7 +1038,7 @@ mod tests {
         for bad_refresh in [
             json!({"ifHash": "x".repeat(65)}),
             json!({"ifHash": 123}),
-            json!({"if_hash": hash}),
+            json!({"unknownField": true}),
         ] {
             let err = handle_rpc_value_with_session(
                 &json!({"jsonrpc":"2.0","id":71,"method":"tools/call","params":{"name":"clamshell_refresh","arguments":bad_refresh}}),
@@ -1048,6 +1049,15 @@ mod tests {
             .unwrap();
             assert_eq!(err["result"]["isError"], true, "bad_refresh={bad_refresh}");
         }
+        let snake_hash = handle_rpc_value_with_session(
+            &json!({"jsonrpc":"2.0","id":710,"method":"tools/call","params":{"name":"clamshell_refresh","arguments":{"if_hash": cfg["result"]["structuredContent"]["hash"]}}}),
+            &mut session,
+            &engine,
+            &html_loader,
+        )
+        .unwrap();
+        assert!(snake_hash["result"].get("isError").is_none());
+        assert_eq!(snake_hash["result"]["structuredContent"]["unchanged"], true);
         let full_refresh = handle_rpc_value_with_session(
             &json!({"jsonrpc":"2.0","id":72,"method":"tools/call","params":{"name":"clamshell_refresh","arguments":{"ifHash":"different-hash","force":true}}}),
             &mut session,

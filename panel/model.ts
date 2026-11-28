@@ -92,6 +92,7 @@ export interface PanelSnapshot {
   degraded?: boolean;
   stale?: boolean;
   unchanged?: boolean;
+  bootTs?: number;
   hash?: string;
   serverMs?: number;
   guardStatus?: string;

@@ -68,6 +68,7 @@ const boot: PanelSnapshot | null =
 const PR = [0, 20, 50, 80, 100] as const;
 const MD = ["auto", "normal", "utility", "eco", "strict"] as const;
 const LKEY = "mac-clamshell-lang";
+const SKEY = "mac-clamshell-snap";
 const AC = "aria-checked";
 const AD = "aria-disabled";
 const AP = "aria-pressed";
@@ -108,6 +109,55 @@ const storeL = (v?: string | null): string | null => {
   }
 };
 
+interface CachedSnap {
+  v: 1;
+  savedAt: number;
+  data: PanelSnapshot;
+}
+
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
+const loadSnap = (): CachedSnap | null => {
+  try {
+    if (typeof localStorage >= "u") return null;
+    const raw = localStorage.getItem(SKEY);
+    if (!raw) return null;
+    const p = JSON.parse(raw) as Partial<CachedSnap> | null;
+    if (!isObj(p) || p.v !== 1 || typeof p.savedAt !== "number" || !Number.isFinite(p.savedAt) || !isObj(p.data)) {
+      return null;
+    }
+    const d = p.data as PanelSnapshot;
+    if (!isObj(d.host) || !isObj(d.settings) || !isObj(d.policy) || !isObj(d.display)) return null;
+    if (d.cpuTopology !== undefined && !isObj(d.cpuTopology)) return null;
+    if (d.host.memory !== undefined && !isObj(d.host.memory)) return null;
+    return p as CachedSnap;
+  } catch {
+    return null;
+  }
+};
+
+const saveSnap = (s: PanelSnapshot | null): void => {
+  if (!s || s.unchanged) return;
+  try {
+    if (typeof localStorage >= "u") return;
+    const { brightnessAction: _ba, paths, ...rest } = s as PanelSnapshot & {
+      paths?: { settingsPath?: string; binaryPath?: string };
+    };
+    const data = paths?.settingsPath ? { ...rest, paths: { settingsPath: paths.settingsPath } } : rest;
+    localStorage.setItem(SKEY, JSON.stringify({ v: 1, savedAt: Date.now(), data }));
+  } catch {}
+};
+
+const cachedSnap = loadSnap();
+const snapNewer = (c: PanelSnapshot, b: PanelSnapshot): boolean => {
+  const ct0 = c.timestamp ? Date.parse(c.timestamp) : NaN;
+  const bt0 = b.timestamp ? Date.parse(b.timestamp) : NaN;
+  return !Number.isFinite(ct0) || !Number.isFinite(bt0) || ct0 >= bt0;
+};
+const useCached =
+  !!cachedSnap && (!boot || (cachedSnap.savedAt > (boot.bootTs ?? 0) && snapNewer(cachedSnap.data, boot)));
+const initSnap: PanelSnapshot | null = useCached ? cachedSnap.data : boot;
+
 let hostLoc: string | null = null;
 const resL = (sl: unknown, bl: unknown): PanelLang =>
   resolvePanelLang({
@@ -118,7 +168,7 @@ const resL = (sl: unknown, bl: unknown): PanelLang =>
     bootLocale: bl,
   });
 
-let lang: PanelLang = resL(boot?.settings?.lang, boot?.locale);
+let lang: PanelLang = resL(initSnap?.settings?.lang, initSnap?.locale);
 let I: Record<string, string> = lang === "zh-CN" ? I18N.zh : I18N.en;
 docEl.lang = lang;
 
@@ -126,11 +176,11 @@ const tr = (k: string, v?: Record<string, string | number>): string => t(lang, k
 const mN = (id: string): string => I[MK[id] || "m0"];
 const pL = (s: number): string => (s ? (s < 0 ? I.b4 : fmtDur(s, lang)) : I.m0);
 
-let cur: PanelSnapshot | null = boot;
-let conf: PanelSnapshot | null = boot;
-let hash = boot?.hash || "";
-let loading = !boot;
-let first = !boot || !!boot.stale;
+let cur: PanelSnapshot | null = initSnap;
+let conf: PanelSnapshot | null = initSnap;
+let hash = initSnap?.hash || "";
+let loading = !initSnap;
+let first = !initSnap || useCached || !!boot?.stale;
 let syncing = false;
 let bSync = false;
 let locking = false;
@@ -142,6 +192,7 @@ let envK = "";
 let pend: Partial<SettingsState> | null = null;
 let inF = false;
 let gen = 0;
+let pollSeq = 0;
 let drag = false;
 let defr = false;
 let busyT: TimerId = null;
@@ -158,7 +209,7 @@ let cpT: TimerId = null;
 let cpOk = false;
 let emp: EmptyState | null = null;
 let rawS = "";
-let lastSL: string | null = boot?.settings?.lang ?? null;
+let lastSL: string | null = initSnap?.settings?.lang ?? null;
 
 const num = (v: unknown, d = 0): number => (v != null && Number.isFinite(+v) ? +v : d);
 const qa = (s: string): NodeListOf<HTMLElement> | never[] => root?.querySelectorAll?.<HTMLElement>(s) || [];
@@ -439,13 +490,17 @@ function applyData(p: PanelSnapshot | null | undefined): void {
     const t0 = p.timestamp;
     if (cur && t0) {
       cur = { ...cur, timestamp: t0 };
-      if (conf) conf = { ...conf, timestamp: t0 };
+      if (conf) {
+        conf = { ...conf, timestamp: t0 };
+        saveSnap(conf);
+      }
     }
     return;
   }
   conf = p;
   cur = syncing && cur?.settings ? computeOptimisticState(p, cur.settings) : p;
   syncSnap(p);
+  saveSnap(p);
 }
 
 function renderEmp(): void {
@@ -774,6 +829,7 @@ async function rpc(name: string, args: Record<string, unknown>, track = true): P
 
 const poller = createAdaptivePoller<PanelSnapshot>({
   defaultEnabled: false,
+  pauseWhenHidden: true,
   shouldSkipBackgroundPoll: () => !canT || syncing || bSync || drag || inF,
   onMetrics: (m) => {
     netM = m;
@@ -781,6 +837,7 @@ const poller = createAdaptivePoller<PanelSnapshot>({
   },
   fetcher: async ({ force, reason }) => {
     if (!canT) return null;
+    const seq = ++pollSeq;
     if (force) {
       loading = true;
       ct(busyT);
@@ -797,11 +854,13 @@ const poller = createAdaptivePoller<PanelSnapshot>({
         { force: !!force, ...(force ? { fresh: true } : {}), ...(hash ? { ifHash: hash } : {}) },
         false
       );
+      if (seq !== pollSeq) return null;
       onOk();
       applyData(sc);
       sc.unchanged ? patchChrome() : patchAll(cur);
       return sc;
     } catch (err) {
+      if (seq !== pollSeq) return null;
       onFail(reason);
       if (!cur) showEmpty({ sp: exErr(err, "e0"), r: 1 });
       else if (reason === "manual") setErr(err, "e0", () => void refreshNow(true));
@@ -817,7 +876,10 @@ const poller = createAdaptivePoller<PanelSnapshot>({
 });
 
 const bCtrl = createBrightnessController<PanelSnapshot>({
-  setter: (percent) => rpc("clamshell_set_brightness", { percent }),
+  setter: (percent) => {
+    pollSeq += 1;
+    return rpc("clamshell_set_brightness", { percent });
+  },
   onOptimistic: (p) => {
     optB = p;
     patchBright(p, canT, true);
@@ -827,6 +889,7 @@ const bCtrl = createBrightnessController<PanelSnapshot>({
     patchFb();
   },
   onCommit: (sc, target) => {
+    pollSeq += 1;
     optB = null;
     if (sc) applyData(sc);
     const a = sc?.brightnessAction;
@@ -871,10 +934,13 @@ async function flushQ(): Promise<void> {
       const g = gen;
       pend = null;
       try {
+        pollSeq += 1;
         const sc = await rpc("clamshell_configure", patch as Record<string, unknown>);
+        pollSeq += 1;
         conf = sc;
         if (sc.hash) hash = sc.hash;
         syncSnap(sc);
+        saveSnap(sc);
         const ok = g === gen && !pend;
         cur = ok ? sc : cur?.settings ? computeOptimisticState(sc, cur.settings) : sc;
         if (ok) {
@@ -1171,6 +1237,7 @@ app.ontoolinput = () => {
 app.ontoolresult = (r) => {
   const sc = r?.structuredContent as PanelSnapshot | undefined;
   if (!sc || typeof sc !== "object" || (!sc.unchanged && !sc.policy && !sc.host)) return;
+  pollSeq += 1;
   const prev = hash;
   const had = !!cur;
   onOk();
@@ -1207,7 +1274,7 @@ async function connectHost(manual = false): Promise<void> {
     onOk();
     if (canT) {
       if (autoW) poller.setEnabled(true);
-      if (cur) poller.markInitialBoot();
+      if (cur) poller.markInitialBoot(boot && !useCached && typeof boot.bootTs === "number" ? boot.bootTs : undefined);
     } else {
       poller.setEnabled(false);
     }
@@ -1217,9 +1284,16 @@ async function connectHost(manual = false): Promise<void> {
       patchChrome();
     }
     if (canT) {
+      const freshBoot =
+        !useCached &&
+        !!boot &&
+        !boot.stale &&
+        typeof boot.bootTs === "number" &&
+        Date.now() - boot.bootTs < 2500;
       if (manual) await refreshNow(true);
-      else if (boot?.stale) void poller.trigger({ force: false, reason: "swr" }).catch(NOOP);
-      else if (!cur) {
+      else if (!freshBoot && (useCached || boot?.stale || (boot && typeof boot.bootTs === "number"))) {
+        void poller.trigger({ force: false, reason: "swr" }).catch(NOOP);
+      } else if (!cur) {
         st(() => {
           if (!cur) void refreshNow(true);
         }, 150);
@@ -1243,9 +1317,10 @@ async function connectHost(manual = false): Promise<void> {
 (() => {
   mount();
   patchI18n();
-  if (boot) {
-    syncSnap(boot);
-    patchAll(boot);
+  if (initSnap) {
+    syncSnap(initSnap);
+    patchAll(initSnap);
+    if (boot && !useCached) saveSnap(boot);
   } else {
     showEmpty({ k: "r1" });
   }
