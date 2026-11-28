@@ -500,6 +500,16 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
         guard.cache = None;
     }
 
+    #[cfg(test)]
+    fn expire_cache_for_test(&self) {
+        let mut guard = lock_unpoisoned(&self.state);
+        if let Some(ref mut c) = guard.cache {
+            if let Some(past) = Instant::now().checked_sub(Duration::from_secs(60)) {
+                c.at = past;
+            }
+        }
+    }
+
     pub fn prewarm(self: &Arc<Self>) {
         let _ = self.collect(true);
     }
@@ -1160,7 +1170,7 @@ mod tests {
                 brightness: Arc::clone(&bright),
             },
             TestFanSensor("active:2140,2210"),
-            10,
+            5_000,
         ));
 
         let cold = engine.collect_swr();
@@ -1169,8 +1179,8 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(cold.snapshot.host.uptime_seconds, 3600);
 
-        // Expire short TTL and mutate uptime; collect_swr() must return immediately without waiting 80ms.
-        std::thread::sleep(Duration::from_millis(20));
+        // Mark cache stale deterministically and mutate uptime; collect_swr() must return immediately without waiting 80ms.
+        engine.expire_cache_for_test();
         uptime.store(3720, Ordering::Relaxed);
         let t0 = Instant::now();
         let stale = engine.collect_swr();
@@ -1184,15 +1194,15 @@ mod tests {
         assert_eq!(stale.server_ms, 0);
         assert_eq!(stale.snapshot.host.uptime_seconds, 3600);
 
-        // Background SWR thread completes and populates fresh cache.
-        for _ in 0..30 {
-            if calls.load(Ordering::SeqCst) >= 2 {
+        // Wait until background SWR refresh completes and releases swr_refreshing.
+        for _ in 0..200 {
+            if calls.load(Ordering::SeqCst) >= 2 && !engine.swr_refreshing.load(Ordering::SeqCst) {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(15));
+            std::thread::sleep(Duration::from_millis(10));
         }
-        std::thread::sleep(Duration::from_millis(25));
         let refreshed = engine.collect(false);
+        assert!(refreshed.from_cache);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(refreshed.snapshot.host.uptime_seconds, 3720);
 
