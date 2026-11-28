@@ -389,6 +389,7 @@ pub struct TelemetryEngine<P: ProbeBackend, D: DisplayBackend> {
     cache_ttl_ms: u64,
     settings_gen: AtomicU64,
     bg_guard_active: AtomicBool,
+    swr_refreshing: AtomicBool,
     guard_wake: (Mutex<u64>, Condvar),
     settings_watch: Mutex<SettingsWatchState>,
     state: Mutex<Coalescer>,
@@ -434,6 +435,7 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
             cache_ttl_ms,
             settings_gen: AtomicU64::new(0),
             bg_guard_active: AtomicBool::new(false),
+            swr_refreshing: AtomicBool::new(false),
             guard_wake: (Mutex::new(0), Condvar::new()),
             settings_watch: Mutex::new(SettingsWatchState {
                 last_fp: init_fp,
@@ -707,6 +709,74 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
             server_ms: t0.elapsed().as_millis() as u64,
             from_cache: false,
             stale: false,
+        }
+    }
+
+    /// Non-blocking stale-while-revalidate telemetry read for `<2ms` SSR boot.
+    /// Returns cached telemetry immediately if present (spawning a background refresh if stale
+    /// or fingerprints drifted), and probes synchronously only when completely cold.
+    pub fn collect_swr(self: &Arc<Self>) -> CollectedTelemetry
+    where
+        P: 'static,
+        D: 'static,
+    {
+        let _ = self.reload_settings_if_changed();
+        let req_gen = self.settings_gen.load(Ordering::SeqCst);
+        let (settings_fp, guard_fp) = self.disk_fingerprints();
+
+        let cached_entry = {
+            let guard = lock_unpoisoned(&self.state);
+            if let Some(ref c) = guard.cache {
+                let fresh = c.gen == req_gen
+                    && c.settings_fp == settings_fp
+                    && c.guard_fp == guard_fp
+                    && (c.at.elapsed().as_millis() as u64) < self.cache_ttl_ms;
+                Some((Arc::clone(&c.snapshot), fresh, guard.in_flight.is_none()))
+            } else {
+                None
+            }
+        };
+
+        match cached_entry {
+            Some((snapshot, true, _)) => CollectedTelemetry {
+                snapshot,
+                server_ms: 0,
+                from_cache: true,
+                stale: false,
+            },
+            Some((snapshot, false, no_in_flight)) => {
+                if no_in_flight
+                    && self
+                        .swr_refreshing
+                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                {
+                    let engine = Arc::clone(self);
+                    if std::thread::Builder::new()
+                        .name("clamshell-swr".into())
+                        .spawn(move || {
+                            struct Reset<'a>(&'a AtomicBool);
+                            impl Drop for Reset<'_> {
+                                fn drop(&mut self) {
+                                    self.0.store(false, Ordering::SeqCst);
+                                }
+                            }
+                            let _reset = Reset(&engine.swr_refreshing);
+                            let _ = engine.collect(false);
+                        })
+                        .is_err()
+                    {
+                        self.swr_refreshing.store(false, Ordering::SeqCst);
+                    }
+                }
+                CollectedTelemetry {
+                    snapshot,
+                    server_ms: 0,
+                    from_cache: true,
+                    stale: true,
+                }
+            }
+            None => self.collect(false),
         }
     }
 
@@ -1063,6 +1133,68 @@ mod tests {
         let cached = engine.collect(false);
         assert!(cached.from_cache);
         assert_eq!(cached.snapshot.policy.profile, "strict");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collect_swr_returns_cached_snapshot_without_blocking_and_refreshes_in_bg() {
+        let dir =
+            std::env::temp_dir().join(format!("mac-clamshell-swr-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let uptime = Arc::new(AtomicU64::new(3600));
+        let lid_closed = Arc::new(AtomicBool::new(false));
+        let bright = Arc::new(Mutex::new(0.70f32));
+
+        let engine = Arc::new(TelemetryEngine::with_ttl(
+            dir.clone(),
+            "mac-clamshell-mcp".into(),
+            FakeProbe {
+                delay_ms: 80,
+                calls: Arc::clone(&calls),
+                uptime: Arc::clone(&uptime),
+                lid_closed: Arc::clone(&lid_closed),
+            },
+            FakeDisplay {
+                brightness: Arc::clone(&bright),
+            },
+            TestFanSensor("active:2140,2210"),
+            10,
+        ));
+
+        let cold = engine.collect_swr();
+        assert!(!cold.from_cache);
+        assert!(!cold.stale);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(cold.snapshot.host.uptime_seconds, 3600);
+
+        // Expire short TTL and mutate uptime; collect_swr() must return immediately without waiting 80ms.
+        std::thread::sleep(Duration::from_millis(20));
+        uptime.store(3720, Ordering::Relaxed);
+        let t0 = Instant::now();
+        let stale = engine.collect_swr();
+        let elapsed_ms = t0.elapsed().as_millis();
+        assert!(
+            elapsed_ms < 40,
+            "SWR boot read must not block on 80ms probe (took {elapsed_ms}ms)"
+        );
+        assert!(stale.from_cache);
+        assert!(stale.stale);
+        assert_eq!(stale.server_ms, 0);
+        assert_eq!(stale.snapshot.host.uptime_seconds, 3600);
+
+        // Background SWR thread completes and populates fresh cache.
+        for _ in 0..30 {
+            if calls.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+        let refreshed = engine.collect(false);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(refreshed.snapshot.host.uptime_seconds, 3720);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

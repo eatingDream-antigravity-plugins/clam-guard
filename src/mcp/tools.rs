@@ -2,7 +2,7 @@ use crate::i18n::{parse_lang_tag, Lang};
 use crate::mcp::telemetry::{summarize_for_model, TelemetryEngine};
 use crate::platform::display_ffi::{clamp_percent, DisplayBackend};
 use crate::platform::macos::ProbeBackend;
-use crate::state::{read_bounded_regular_file, SettingsPatch, MAX_PANEL_HTML_BYTES};
+use crate::state::{now_epoch_ms, read_bounded_regular_file, SettingsPatch, MAX_PANEL_HTML_BYTES};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fs;
@@ -187,13 +187,14 @@ pub fn read_resource_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static
         return Err(format!("Unknown resource URI: {uri}"));
     }
     let template = html_loader.load();
-    let collected = engine.collect(false);
+    let collected = engine.collect_swr();
     let mut boot_val = serde_json::to_value(&*collected.snapshot).unwrap_or_else(|_| json!({}));
     if let Some(obj) = boot_val.as_object_mut() {
         obj.insert("unchanged".into(), json!(false));
         obj.insert("serverMs".into(), json!(collected.server_ms));
         obj.insert("fromCache".into(), json!(collected.from_cache));
         obj.insert("stale".into(), json!(collected.stale));
+        obj.insert("bootTs".into(), json!(now_epoch_ms() as u64));
         obj.insert("serverVersion".into(), json!(SERVER_VERSION));
     }
     let boot_script = format!(
@@ -378,7 +379,7 @@ pub fn list_tools_json(apps_capable: bool) -> Value {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RefreshArgs {
-    #[serde(default)]
+    #[serde(default, alias = "if_hash")]
     if_hash: Option<String>,
     #[serde(default)]
     force: Option<bool>,

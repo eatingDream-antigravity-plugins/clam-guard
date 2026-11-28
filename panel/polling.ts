@@ -35,10 +35,10 @@ export function computeAdaptiveIntervalMs({
 }: AdaptiveIntervalOptions = {}): number {
   const r = +rttMs > 0 ? +rttMs : 0;
   const ov = hidden ? bgOverrideMs : fgOverrideMs;
-  const b =
-    ov > 0
-      ? ov
-      : (hidden ? [6e3, 1e4, 18e3, 3e4] : [3e3, 5e3, 1e4, 2e4])[r > 800 ? 3 : r > 350 ? 2 : r > 150 ? 1 : 0];
+  const tier = (hidden ? [6e3, 1e4, 18e3, 3e4] : [3e3, 5e3, 1e4, 2e4])[
+    r > 800 ? 3 : r > 350 ? 2 : r > 150 ? 1 : 0
+  ];
+  const b = M.max(ov > 0 ? ov : tier, M.min(15e3, M.round(r * 3)));
   const e = M.max(0, M.floor(+consecutiveErrors || 0));
   return e ? M.min(12e4, b * (1 << M.min(e, 4))) : b;
 }
@@ -69,6 +69,7 @@ export interface AdaptivePollerOptions<
 > {
   fetcher: (opts: { force: boolean; reason: string }) => Promise<TRes | null>;
   defaultEnabled?: boolean;
+  pauseWhenHidden?: boolean;
   isHidden?: () => boolean;
   shouldSkipBackgroundPoll?: () => boolean;
   onMetrics?: (metrics: PollerMetrics) => void;
@@ -98,6 +99,7 @@ export function createAdaptivePoller<
 >({
   fetcher,
   defaultEnabled = true,
+  pauseWhenHidden = false,
   isHidden = () => typeof document < "u" && Boolean(document.hidden),
   shouldSkipBackgroundPoll = () => false,
   onMetrics = NOOP,
@@ -119,7 +121,7 @@ export function createAdaptivePoller<
   let err = 0;
   let fgO = 0;
   let bgO = 0;
-  let bgP = false;
+  let bgP = !!pauseWhenHidden;
   let bg = !!isHidden();
   let ms = computeAdaptiveIntervalMs({ hidden: bg });
   let okT = 0;
@@ -243,7 +245,7 @@ export function createAdaptivePoller<
     },
     setIntervals({ fgSec = 0, bgSec = 0 }: { fgSec?: number; bgSec?: number } = {}): void {
       const f = +fgSec > 0 ? M.round(+fgSec * 1e3) : 0;
-      const p = +bgSec < 0;
+      const p = +bgSec < 0 || (!!pauseWhenHidden && +bgSec <= 0);
       const b = !p && +bgSec > 0 ? M.round(+bgSec * 1e3) : 0;
       if (f === fgO && b === bgO && p === bgP) return;
       fgO = f;
