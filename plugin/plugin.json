@@ -1,7 +1,7 @@
 {
   "name": "mac-clamshell-mcp",
   "displayName": "Clam Guard",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "Native Rust macOS clamshell performance throttling, display thermal guard, built-in brightness control, one-click lock screen, and low-bandwidth MCP dashboard.",
   "author": {
     "name": "eatingDream",

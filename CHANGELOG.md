@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.2](https://github.com/eatingDream-antigravity-plugins/clam-guard/compare/v1.5.1...v1.5.2) (2026-11-28)
+
+
+### Performance Improvements
+
+* non-blocking SWR boot, 0ms localStorage hydration, and weak-net polling ([#34](https://github.com/eatingDream-antigravity-plugins/clam-guard/issues/34)) ([1838961](https://github.com/eatingDream-antigravity-plugins/clam-guard/commit/183896179913741bf8710f91c410e35b1d227703))
+
 ## [1.5.1](https://github.com/eatingDream-antigravity-plugins/clam-guard/compare/v1.5.0...v1.5.1) (2026-11-28)
 
 
